@@ -1,5 +1,9 @@
 # Led 32x32 Matrix 
 
+
+![physical setup](https://github.com/panjanek/esp-rgb-matrix/blob/b7c0791ffc91d8f2bd6cf2ae6a49950e5b408bb4/images/rgb.gif "physical setup")
+![Web interface](https://github.com/panjanek/esp-rgb-matrix/blob/b7c0791ffc91d8f2bd6cf2ae6a49950e5b408bb4/images/www.gif "web interface")
+
 ## Features:
 * Web interface
 * REST API
