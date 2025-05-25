@@ -1,2 +1,2 @@
-# esp-rgb-matrix
-Led matrix with REST API and UDP streaming based on ESP8266
+# Led 32x32 Matrix with REST API, Web interface, and UDP "streaming"
+
