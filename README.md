@@ -36,4 +36,4 @@ Use "Generrig esp8266 board" with following config:
 
 ## Wiring
 
-![Wiring diagram](https://github.com/panjanek/esp-rgb-matrix/blob/a4d4f8c96adbd872e76d5bee97589852e9fabb8b/images/wiring-rgb.png "wiring diagram")
+![Wiring diagram](https://github.com/panjanek/esp-rgb-matrix/blob/52fab240a53717839f5bfc24dc8ca9efc6c62c83/images/wiring-rgb.png "wiring diagram")
