@@ -3,6 +3,7 @@
 ![physical setup](https://github.com/panjanek/esp-rgb-matrix/blob/2fc2af995d744b665803bd0670991a984f6a42d1/images/nyan.gif "physical setup")
 ![physical setup](https://github.com/panjanek/esp-rgb-matrix/blob/b7c0791ffc91d8f2bd6cf2ae6a49950e5b408bb4/images/rgb.gif "physical setup")
 ![Web interface](https://github.com/panjanek/esp-rgb-matrix/blob/b7c0791ffc91d8f2bd6cf2ae6a49950e5b408bb4/images/www.gif "web interface")
+![physical setup](https://github.com/panjanek/esp-rgb-matrix/blob/a0d0e468b642d425ff72234df3bcf2b6b95213a1/images/setup.png "physical setup")
 
 ## Features:
 * Web interface
