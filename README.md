@@ -6,10 +6,11 @@
 ![physical setup](https://github.com/panjanek/esp-rgb-matrix/blob/a0d0e468b642d425ff72234df3bcf2b6b95213a1/images/setup.png "physical setup")
 
 ## Features:
-* Web interface
+* Web interface (with GIF upload)
 * REST API
-* Low level pixel UDP API
+* Low level bitmap streaming UDP API
 * Python library
+* Fits perfectly into IKEA 32x32cm picture frame :)
 
 ## Components:
 * ESP 8266 (any board, optionaly with small OLED screen for debugging)
