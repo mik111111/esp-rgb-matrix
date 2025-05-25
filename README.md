@@ -8,7 +8,7 @@
 ## Features:
 * Web interface (with GIF upload)
 * REST API
-* Low level pixel UDP API
+* Low level bitmap streaming UDP API
 * Python library
 * Fits perfectly into IKEA 32x32cm picture frame :)
 
