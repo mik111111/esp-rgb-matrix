@@ -14,9 +14,9 @@
 ## Components:
 * ESP 8266 (any board, optionaly with small OLED screen for debugging)
 * Pixel booster (3.3V -> 5V)
-* 32x32 WS2812B panel (may be combined with smaller panels connected in serie)
+* 32x32 WS2812B panel (may be combined from smaller panels connected in series)
 * Button
-* 5V power supply (50W) 
+* 5V power supply (~50W) 
 
 ## Sofware:
 * Arduino IDE
