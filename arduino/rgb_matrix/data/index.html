@@ -1,0 +1,1372 @@
+<!DOCTYPE HTML>
+<html>
+<head>
+    <title>RGB Matrix</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="content-type" content="text/html; charset=utf-8">
+	<script>
+/*============================================================================
+  Gif Decoder and player for use with Canvas API's
+
+**NOT** for commercial use.
+
+To use
+
+    var myGif = GIF();                  // creates a new gif  
+    var myGif = new GIF();              // will work as well but not needed as GIF() returns the correct reference already.    
+    myGif.load("myGif.gif");            // set URL and load
+    myGif.onload = function(event){     // fires when loading is complete
+                                        //event.type   = "load"
+                                        //event.path   array containing a reference to the gif
+    }
+    myGif.onprogress = function(event){ // Note this function is not bound to myGif
+                                        //event.bytesRead    bytes decoded
+                                        //event.totalBytes   total bytes
+                                        //event.frame        index of last frame decoded
+    }
+    myGif.onerror = function(event){    // fires if there is a problem loading. this = myGif
+                                        //event.type   a description of the error
+                                        //event.path   array containing a reference to the gif
+    }
+
+Once loaded the gif can be displayed
+    if(!myGif.loading){
+        ctx.drawImage(myGif.image,0,0); 
+    }
+You can display the last frame loaded during loading
+
+    if(myGif.lastFrame !== null){
+        ctx.drawImage(myGif.lastFrame.image,0,0); 
+    }
+
+
+To access all the frames
+    var gifFrames = myGif.frames; // an array of frames.
+
+A frame holds various frame associated items.
+    myGif.frame[0].image; // the first frames image
+    myGif.frame[0].delay; // time in milliseconds frame is displayed for
+
+
+
+
+Gifs use various methods to reduce the file size. The loaded frames do not maintain the optimisations and hold the full resolution frames as DOM images. This mean the memory footprint of a decode gif will be many time larger than the Gif file.
+ */
+const GIF = function () {
+    // **NOT** for commercial use.
+    var timerID;                          // timer handle for set time out usage
+    var st;                               // holds the stream object when loading.
+    var interlaceOffsets  = [0, 4, 2, 1]; // used in de-interlacing.
+    var interlaceSteps    = [8, 8, 4, 2];
+    var interlacedBufSize;  // this holds a buffer to de interlace. Created on the first frame and when size changed
+    var deinterlaceBuf;
+    var pixelBufSize;    // this holds a buffer for pixels. Created on the first frame and when size changed
+    var pixelBuf;
+    const GIF_FILE = { // gif file data headers
+        GCExt   : 0xF9,
+        COMMENT : 0xFE,
+        APPExt  : 0xFF,
+        UNKNOWN : 0x01, // not sure what this is but need to skip it in parser
+        IMAGE   : 0x2C,
+        EOF     : 59,   // This is entered as decimal
+        EXT     : 0x21,
+    };      
+    // simple buffered stream used to read from the file 
+    var Stream = function (data) { 
+        this.data = new Uint8ClampedArray(data);
+        this.pos  = 0;
+        var len   = this.data.length;
+        this.getString = function (count) { // returns a string from current pos of len count
+            var s = "";
+            while (count--) { s += String.fromCharCode(this.data[this.pos++]) }
+            return s;
+        };
+        this.readSubBlocks = function () { // reads a set of blocks as a string
+            var size, count, data  = "";
+            do {
+                count = size = this.data[this.pos++];
+                while (count--) { data += String.fromCharCode(this.data[this.pos++]) }
+            } while (size !== 0 && this.pos < len);
+            return data;
+        }
+        this.readSubBlocksB = function () { // reads a set of blocks as binary
+            var size, count, data = [];
+            do {
+                count = size = this.data[this.pos++];
+                while (count--) { data.push(this.data[this.pos++]);}
+            } while (size !== 0 && this.pos < len);
+            return data;
+        }
+    };
+    // LZW decoder uncompressed each frames pixels
+    // this needs to be optimised.
+    // minSize is the min dictionary as powers of two
+    // size and data is the compressed pixels
+    function lzwDecode(minSize, data) {
+        var i, pixelPos, pos, clear, eod, size, done, dic, code, last, d, len;
+        pos = pixelPos = 0;
+        dic      = [];
+        clear    = 1 << minSize;
+        eod      = clear + 1;
+        size     = minSize + 1;
+        done     = false;
+        while (!done) { // JavaScript optimisers like a clear exit though I never use 'done' apart from fooling the optimiser
+            last = code;
+            code = 0;
+            for (i = 0; i < size; i++) {
+                if (data[pos >> 3] & (1 << (pos & 7))) { code |= 1 << i }
+                pos++;
+            }
+            if (code === clear) { // clear and reset the dictionary
+                dic = [];
+                size = minSize + 1;
+                for (i = 0; i < clear; i++) { dic[i] = [i] }
+                dic[clear] = [];
+                dic[eod] = null;
+            } else {
+                if (code === eod) {  done = true; return }
+                if (code >= dic.length) { dic.push(dic[last].concat(dic[last][0])) }
+                else if (last !== clear) { dic.push(dic[last].concat(dic[code][0])) }
+                d = dic[code];
+                len = d.length;
+                for (i = 0; i < len; i++) { pixelBuf[pixelPos++] = d[i] }
+                if (dic.length === (1 << size) && size < 12) { size++ }
+            }
+        }
+    };
+    function parseColourTable(count) { // get a colour table of length count  Each entry is 3 bytes, for RGB.
+        var colours = [];
+        for (var i = 0; i < count; i++) { colours.push([st.data[st.pos++], st.data[st.pos++], st.data[st.pos++]]) }
+        return colours;
+    }
+    function parse (){        // read the header. This is the starting point of the decode and async calls parseBlock
+        var bitField;
+        st.pos                += 6;  
+        gif.width             = (st.data[st.pos++]) + ((st.data[st.pos++]) << 8);
+        gif.height            = (st.data[st.pos++]) + ((st.data[st.pos++]) << 8);
+        bitField              = st.data[st.pos++];
+        gif.colorRes          = (bitField & 0b1110000) >> 4;
+        gif.globalColourCount = 1 << ((bitField & 0b111) + 1);
+        gif.bgColourIndex     = st.data[st.pos++];
+        st.pos++;                    // ignoring pixel aspect ratio. if not 0, aspectRatio = (pixelAspectRatio + 15) / 64
+        if (bitField & 0b10000000) { gif.globalColourTable = parseColourTable(gif.globalColourCount) } // global colour flag
+        setTimeout(parseBlock, 0);
+    }
+    function parseAppExt() { // get application specific data. Netscape added iterations and terminator. Ignoring that
+        st.pos += 1;
+        if ('NETSCAPE' === st.getString(8)) { st.pos += 8 }  // ignoring this data. iterations (word) and terminator (byte)
+        else {
+            st.pos += 3;            // 3 bytes of string usually "2.0" when identifier is NETSCAPE
+            st.readSubBlocks();     // unknown app extension
+        }
+    };
+    function parseGCExt() { // get GC data
+        var bitField;
+        st.pos++;
+        bitField              = st.data[st.pos++];
+        gif.disposalMethod    = (bitField & 0b11100) >> 2;
+        gif.transparencyGiven = bitField & 0b1 ? true : false; // ignoring bit two that is marked as  userInput???
+        gif.delayTime         = (st.data[st.pos++]) + ((st.data[st.pos++]) << 8);
+        gif.transparencyIndex = st.data[st.pos++];
+        st.pos++;
+    };
+    function parseImg() {                           // decodes image data to create the indexed pixel image
+        var deinterlace, frame, bitField;
+        deinterlace = function (width) {                   // de interlace pixel data if needed
+            var lines, fromLine, pass, toline;
+            lines = pixelBufSize / width;
+            fromLine = 0;
+            if (interlacedBufSize !== pixelBufSize) {      // create the buffer if size changed or undefined.
+                deinterlaceBuf = new Uint8Array(pixelBufSize);
+                interlacedBufSize = pixelBufSize;
+            }
+            for (pass = 0; pass < 4; pass++) {
+                for (toLine = interlaceOffsets[pass]; toLine < lines; toLine += interlaceSteps[pass]) {
+                    deinterlaceBuf.set(pixelBuf.subarray(fromLine, fromLine + width), toLine * width);
+                    fromLine += width;
+                }
+            }
+        };
+        frame                = {}
+        gif.frames.push(frame);
+        frame.disposalMethod = gif.disposalMethod;
+        frame.time           = gif.length;
+        frame.delay          = gif.delayTime * 10;
+        gif.length          += frame.delay;
+        if (gif.transparencyGiven) { frame.transparencyIndex = gif.transparencyIndex }
+        else { frame.transparencyIndex = undefined }
+        frame.leftPos = (st.data[st.pos++]) + ((st.data[st.pos++]) << 8);
+        frame.topPos  = (st.data[st.pos++]) + ((st.data[st.pos++]) << 8);
+        frame.width   = (st.data[st.pos++]) + ((st.data[st.pos++]) << 8);
+        frame.height  = (st.data[st.pos++]) + ((st.data[st.pos++]) << 8);
+        bitField      = st.data[st.pos++];
+        frame.localColourTableFlag = bitField & 0b10000000 ? true : false; 
+        if (frame.localColourTableFlag) { frame.localColourTable = parseColourTable(1 << ((bitField & 0b111) + 1)) }
+        if (pixelBufSize !== frame.width * frame.height) { // create a pixel buffer if not yet created or if current frame size is different from previous
+            pixelBuf     = new Uint8Array(frame.width * frame.height);
+            pixelBufSize = frame.width * frame.height;
+        }
+        lzwDecode(st.data[st.pos++], st.readSubBlocksB()); // decode the pixels
+        if (bitField & 0b1000000) {                        // de interlace if needed
+            frame.interlaced = true;
+            deinterlace(frame.width);
+        } else { frame.interlaced = false }
+        processFrame(frame);                               // convert to canvas image
+    };
+    function processFrame(frame) { // creates a RGBA canvas image from the indexed pixel data.
+        var ct, cData, dat, pixCount, ind, useT, i, pixel, pDat, col, frame, ti;
+        frame.image        = document.createElement('canvas');
+        frame.image.width  = gif.width;
+        frame.image.height = gif.height;
+        frame.image.ctx    = frame.image.getContext("2d");
+        ct = frame.localColourTableFlag ? frame.localColourTable : gif.globalColourTable;
+        if (gif.lastFrame === null) { gif.lastFrame = frame }
+        useT = (gif.lastFrame.disposalMethod === 2 || gif.lastFrame.disposalMethod === 3) ? true : false;
+        if (!useT) { frame.image.ctx.drawImage(gif.lastFrame.image, 0, 0, gif.width, gif.height) }
+        cData = frame.image.ctx.getImageData(frame.leftPos, frame.topPos, frame.width, frame.height);
+        ti  = frame.transparencyIndex;
+        dat = cData.data;
+        if (frame.interlaced) { pDat = deinterlaceBuf }
+        else { pDat = pixelBuf }
+        pixCount = pDat.length;
+        ind = 0;
+        for (i = 0; i < pixCount; i++) {
+            pixel = pDat[i];
+            col   = ct[pixel];
+            if (ti !== pixel) {
+                dat[ind++] = col[0];
+                dat[ind++] = col[1];
+                dat[ind++] = col[2];
+                dat[ind++] = 255;      // Opaque.
+            } else
+                if (useT) {
+                    dat[ind + 3] = 0; // Transparent.
+                    ind += 4;
+                } else { ind += 4 }
+        }
+        frame.image.ctx.putImageData(cData, frame.leftPos, frame.topPos);
+        gif.lastFrame = frame;
+        if (!gif.waitTillDone && typeof gif.onload === "function") { doOnloadEvent() }// if !waitTillDone the call onload now after first frame is loaded
+    };
+    // **NOT** for commercial use.
+    function finnished() { // called when the load has completed
+        gif.loading           = false;
+        gif.frameCount        = gif.frames.length;
+        gif.lastFrame         = null;
+        st                    = undefined;
+        gif.complete          = true;
+        gif.disposalMethod    = undefined;
+        gif.transparencyGiven = undefined;
+        gif.delayTime         = undefined;
+        gif.transparencyIndex = undefined;
+        gif.waitTillDone      = undefined;
+        pixelBuf              = undefined; // dereference pixel buffer
+        deinterlaceBuf        = undefined; // dereference interlace buff (may or may not be used);
+        pixelBufSize          = undefined;
+        deinterlaceBuf        = undefined;
+        gif.currentFrame      = 0;
+        if (gif.frames.length > 0) { gif.image = gif.frames[0].image }
+        doOnloadEvent();
+        if (typeof gif.onloadall === "function") {
+            (gif.onloadall.bind(gif))({   type : 'loadall', path : [gif] });
+        }
+        if (gif.playOnLoad) { gif.play() }
+    }
+    function canceled () { // called if the load has been cancelled
+        finnished();
+        if (typeof gif.cancelCallback === "function") { (gif.cancelCallback.bind(gif))({ type : 'canceled', path : [gif] }) }
+    }
+    function parseExt() {              // parse extended blocks
+        const blockID = st.data[st.pos++];
+        if(blockID === GIF_FILE.GCExt) { parseGCExt() }
+        else if(blockID === GIF_FILE.COMMENT) { gif.comment += st.readSubBlocks() }
+        else if(blockID === GIF_FILE.APPExt) { parseAppExt() }
+        else {
+            if(blockID === GIF_FILE.UNKNOWN) { st.pos += 13; } // skip unknow block
+            st.readSubBlocks();
+        }
+
+    }
+    function parseBlock() { // parsing the blocks
+        if (gif.cancel !== undefined && gif.cancel === true) { canceled(); return }
+
+        const blockId = st.data[st.pos++];
+        if(blockId === GIF_FILE.IMAGE ){ // image block
+            parseImg();
+            if (gif.firstFrameOnly) { finnished(); return }
+        }else if(blockId === GIF_FILE.EOF) { finnished(); return }
+        else { parseExt() }
+        if (typeof gif.onprogress === "function") {
+            gif.onprogress({ bytesRead  : st.pos, totalBytes : st.data.length, frame : gif.frames.length });
+        }
+        setTimeout(parseBlock, 0); // parsing frame async so processes can get some time in.
+    };
+    function cancelLoad(callback) { // cancels the loading. This will cancel the load before the next frame is decoded
+        if (gif.complete) { return false }
+        gif.cancelCallback = callback;
+        gif.cancel         = true;
+        return true;
+    }
+    function error(type) {
+        if (typeof gif.onerror === "function") { (gif.onerror.bind(this))({ type : type, path : [this] }) }
+        gif.onload  = gif.onerror = undefined;
+        gif.loading = false;
+    }
+    function doOnloadEvent() { // fire onload event if set
+        gif.currentFrame = 0;
+        gif.nextFrameAt  = gif.lastFrameAt  = new Date().valueOf(); // just sets the time now
+        if (typeof gif.onload === "function") { (gif.onload.bind(gif))({ type : 'load', path : [gif] }) }
+        gif.onerror = gif.onload  = undefined;
+    }
+    function dataLoaded(data) { // Data loaded create stream and parse
+        st = new Stream(data);
+        parse();
+    }
+    function loadGif(filename) { // starts the load
+        var ajax = new XMLHttpRequest();
+        ajax.responseType = "arraybuffer";
+        ajax.onload = function (e) {
+            if (e.target.status === 404) { error("File not found") }
+            else if(e.target.status >= 200 && e.target.status < 300 ) { dataLoaded(ajax.response) }
+            else { error("Loading error : " + e.target.status) }
+        };
+        ajax.open('GET', filename, true);
+        ajax.send();
+        ajax.onerror = function (e) { error("File error") };
+        this.src = filename;
+        this.loading = true;
+    }
+    function play() { // starts play if paused
+        if (!gif.playing) {
+            gif.paused  = false;
+            gif.playing = true;
+            playing();
+        }
+    }
+    function pause() { // stops play
+        gif.paused  = true;
+        gif.playing = false;
+        clearTimeout(timerID);
+    }
+    function togglePlay(){
+        if(gif.paused || !gif.playing){ gif.play() }
+        else{ gif.pause() }
+    }
+    function seekFrame(frame) { // seeks to frame number.
+        clearTimeout(timerID);
+        gif.currentFrame = frame % gif.frames.length;
+        if (gif.playing) { playing() }
+        else { gif.image = gif.frames[gif.currentFrame].image }
+    }
+    function seek(time) { // time in Seconds  // seek to frame that would be displayed at time
+        clearTimeout(timerID);
+        if (time < 0) { time = 0 }
+        time *= 1000; // in ms
+        time %= gif.length;
+        var frame = 0;
+        while (time > gif.frames[frame].time + gif.frames[frame].delay && frame < gif.frames.length) {  frame += 1 }
+        gif.currentFrame = frame;
+        if (gif.playing) { playing() }
+        else { gif.image = gif.frames[gif.currentFrame].image}
+    }
+    function playing() {
+        var delay;
+        var frame;
+        if (gif.playSpeed === 0) {
+            gif.pause();
+            return;
+        } else {
+            if (gif.playSpeed < 0) {
+                gif.currentFrame -= 1;
+                if (gif.currentFrame < 0) {gif.currentFrame = gif.frames.length - 1 }
+                frame = gif.currentFrame;
+                frame -= 1;
+                if (frame < 0) {  frame = gif.frames.length - 1 }
+                delay = -gif.frames[frame].delay * 1 / gif.playSpeed;
+            } else {
+                gif.currentFrame += 1;
+                gif.currentFrame %= gif.frames.length;
+                delay = gif.frames[gif.currentFrame].delay * 1 / gif.playSpeed;
+            }
+            gif.image = gif.frames[gif.currentFrame].image;
+            timerID = setTimeout(playing, delay);
+        }
+    }
+    var gif = {                      // the gif image object
+        onload         : null,       // fire on load. Use waitTillDone = true to have load fire at end or false to fire on first frame
+        onerror        : null,       // fires on error
+        onprogress     : null,       // fires a load progress event
+        onloadall      : null,       // event fires when all frames have loaded and gif is ready
+        paused         : false,      // true if paused
+        playing        : false,      // true if playing
+        waitTillDone   : true,       // If true onload will fire when all frames loaded, if false, onload will fire when first frame has loaded
+        loading        : false,      // true if still loading
+        firstFrameOnly : false,      // if true only load the first frame
+        width          : null,       // width in pixels
+        height         : null,       // height in pixels
+        frames         : [],         // array of frames
+        comment        : "",         // comments if found in file. Note I remember that some gifs have comments per frame if so this will be all comment concatenated
+        length         : 0,          // gif length in ms (1/1000 second)
+        currentFrame   : 0,          // current frame. 
+        frameCount     : 0,          // number of frames
+        playSpeed      : 1,          // play speed 1 normal, 2 twice 0.5 half, -1 reverse etc...
+        lastFrame      : null,       // temp hold last frame loaded so you can display the gif as it loads
+        image          : null,       // the current image at the currentFrame
+        playOnLoad     : true,       // if true starts playback when loaded
+        // functions
+        load           : loadGif,    // call this to load a file
+        cancel         : cancelLoad, // call to stop loading
+        play           : play,       // call to start play
+        pause          : pause,      // call to pause
+        seek           : seek,       // call to seek to time
+        seekFrame      : seekFrame,  // call to seek to frame
+        togglePlay     : togglePlay, // call to toggle play and pause state
+    };
+    return gif;
+}
+
+
+
+/*=========================================================================
+End of gif reader
+
+*/	
+	</script>
+	
+	
+	
+	<style>
+		* {box-sizing: border-box;}
+		
+		input[type=range][orient=vertical] {
+			writing-mode: vertical-lr;
+			direction: rtl;
+			appearance: slider-vertical;
+			width: 16px;
+			vertical-align: bottom;
+		}
+
+		body { 
+		  margin: 0;
+		  font-family: Arial, Helvetica, sans-serif;
+		}
+
+		#navbar {
+		  overflow: hidden;
+		  background-color: #f1f1f1;
+		  padding: 10px 10px;
+		  transition: 0.4s;
+		  position: fixed;
+		  width: 100%;
+		  top: 0;
+		  z-index: 99;
+		}
+
+		#navbar a {
+		  float: left;
+		  color: black;
+		  text-align: center;
+		  padding: 12px;
+		  text-decoration: none;
+		  font-size: 18px; 
+		  line-height: 25px;
+		  border-radius: 4px;
+		}
+
+		#navbar #logo {
+		  font-size: 24px;
+		  font-weight: bold;
+		  transition: 0.4s;
+		}
+
+		#navbar a:hover {
+		  background-color: #ddd;
+		  color: black;
+		}
+
+		#navbar a.active {
+		  background-color: dodgerblue;
+		  color: white;
+		}
+
+		#navbar-right {
+		  float: right;
+		}
+
+		@media screen and (max-width: 580px) {
+		  #navbar {
+			padding: 20px 10px !important;
+		  }
+		  #navbar a {
+			float: none;
+			display: block;
+			text-align: left;
+		  }
+		  #navbar-right {
+			float: none;
+		  }
+		}
+	
+	.footer {
+	  position: fixed;
+	  left: 0;
+	  bottom: 0;
+	  width: 100%;
+	  background-color: #04AA6D;
+	  color: white;
+	  text-align: center;
+	}
+
+	input[type=submit] {
+	  background-color: #04AA6D;
+	  color: white;
+	  padding: 12px 20px;
+	  border: none;
+	  border-radius: 4px;
+	  cursor: pointer;
+	}
+
+	input[type=submit]:hover {
+	  background-color: #45a049;
+	}
+
+	.container {
+	  display: block;
+	  position: relative;
+	  padding-left: 35px;
+	  margin-bottom: 12px;
+	  cursor: pointer;
+	  font-size: 22px;
+	  -webkit-user-select: none;
+	  -moz-user-select: none;
+	  -ms-user-select: none;
+	  user-select: none;
+	}
+	
+	.previewcanvas {
+	  margin: 2px 2px 0px 0px;
+	}
+
+	/* Hide the browser's default checkbox */
+	.container input {
+	  position: absolute;
+	  opacity: 0;
+	  cursor: pointer;
+	  height: 0;
+	  width: 0;
+	}
+
+	/* Create a custom checkbox */
+	.checkmark {
+	  position: absolute;
+	  top: 0;
+	  left: 0;
+	  height: 25px;
+	  width: 25px;
+	  background-color: #eee;
+	}
+
+	/* On mouse-over, add a grey background color */
+	.container:hover input ~ .checkmark {
+	  background-color: #ccc;
+	}
+
+	/* When the checkbox is checked, add a blue background */
+	.container input:checked ~ .checkmark {
+	  background-color: #2196F3;
+	}
+
+	/* Create the checkmark/indicator (hidden when not checked) */
+	.checkmark:after {
+	  content: "";
+	  position: absolute;
+	  display: none;
+	}
+
+	/* Show the checkmark when checked */
+	.container input:checked ~ .checkmark:after {
+	  display: block;
+	}
+
+	/* Style the checkmark/indicator */
+	.container .checkmark:after {
+	  left: 9px;
+	  top: 5px;
+	  width: 5px;
+	  height: 10px;
+	  border: solid white;
+	  border-width: 0 3px 3px 0;
+	  -webkit-transform: rotate(45deg);
+	  -ms-transform: rotate(45deg);
+	  transform: rotate(45deg);
+	}
+    .msg {
+	  width: 100%;
+	  background-color: green;
+	  color: white;
+	  text-align: center;
+	}
+	
+	table {
+	  border-collapse: collapse;
+	  border-spacing: 0;
+	  width: 100%;
+	  border: 1px solid #ddd;
+	}
+
+	th, td {
+	  text-align: left;
+	  padding: 16px;
+	}
+
+	tr:nth-child(even) {
+	  background-color: #f2f2f2;
+	}	
+	
+	</style>
+</head>
+<body style="max-width:1100px; margin: auto;">
+	<div id="navbar" style="text-align:center; max-width:1095px">
+	  <a href="#default" id="logo" style="margin:auto;text-align:center;">ESP8266 RGB Matrix of WS2812B LEDs</a> <div style="padding:15px;"> <span id='connection'>NOT connected</span> </div>
+	</div>
+	
+	
+	<br/>
+	<br/>
+	<br/>
+	<br/>
+	<br/>
+	<br/>
+
+	
+    <div style="margin-top:10px;padding:15px; 15px; 700px;font-size:18px">
+	
+	  <div id="msg-ok" style="display:none;"> 
+	    <div class="msg">Operation succes</div>
+      </div>
+	  
+	  <div id="msg-err" style="display:none;"> 
+	    <div class="msg" style="background-color:red;">Operation failed or invalid password</div>
+      </div>	
+
+      <table>
+	      <tr>
+		      <th style="text-align: center">Clear</th>
+		  </tr>
+		  <tr>
+		      <td style="text-align:center">
+			    <input type="color" name="clear_color" id = "clear_color"/>
+                <button id="clear_color_btn" onclick="rgb_clear()">Clear</button>				
+			  </td>
+		  </tr>
+		  
+	      <tr>
+		      <th style="text-align: center">Settings</th>
+		  </tr>
+		  <tr>
+		      <td style="text-align:center">
+			      <label>Brightness</label>
+			      <input type="range" min="5" max="128" value="20" name="brightness" id="brightness" step="1" onchange="brightness_update()" style="width: 256px;" oninput="brightness_output.value=parseInt(brightness.value)">
+				  <output id='brightness_output' name='brightness_output'>20</output>
+			  </td>
+		  </tr>
+		  
+		  <tr>
+		      <th style="text-align: center">Effect</th>
+		  </tr>
+		  <tr>
+		      <td style="text-align:center">
+
+				<select name="effect" id="effect" onchange="effect_change()">
+				  <option value="matrix" data-nr='1'>Matrix</option>
+				  <option value="rainbow" data-nr='2'>Rainbow</option>
+				  <option value="stars" data-nr='3'>Stars</option>
+				  <option value="scroll" data-nr='4'>Scroll</option>
+				  <option value="clock" data-nr='5'>Clock</option>
+				  <option value="defaultgif" data-nr='6'>Default GIF</option>
+				  <option value="customgif" data-nr='7'>Uploaded GIF</option>
+				  <option value="sunrise" data-nr='8'>Sunrise</option>
+				</select>
+				<input type="text" id="scroll_text" name="scroll_text" placeholder="scroll text..." maxlength="500" style='display:none;'/>
+				<button id="effect_start" onclick="effect_start()">Start</button>
+			  </td>
+	      </tr>
+		  
+		  
+		  <tr>
+		      <th style="text-align: center">GIF Upload</th>
+		  </tr>
+		  <tr>
+		      <td>
+			      <label for="gif_file">Load from local machine</label>
+			      <input type="file" name="gif_file" id = "gif_file" onchange="gif_changed()" accept=".gif"/>
+				  <label for="gir_url">or from url:</label>
+				  <input type="text" name="gif_url" id = "gif_url" onchange="gif_changed()" style="width:330px;"/>
+				  <span id='gif_status'></span>
+				  <table id='gif_upload_panel' style="display:none;table-layout:fixed;width:990px;">
+				      <tr>
+					      <td style="width:64px;"></td>
+						  <td style="width:280px; text-align:center">Original</td>
+						  <td style="width:280px;"></td>
+						  <td style="width:280px; text-align:center">After upload</td>
+					  </tr>
+				      <tr>
+					    <td><input type="range" min="-300" max="300" value="0" id="gif_cy" step="1" onchange="canvas_control_update()" orient="vertical" style="height: 256px;"></td>
+						<td><canvas id="gif_canvas" width="256px" height="256px"></canvas></td>
+						<td style="width:280px;">
+						    <label for="gif_zoom">Zoom</label>
+						    <input type="range" min="0.1" max="10" value="0" id="gif_zoom" step="0.05" onchange="canvas_control_update()" style="width: 256px;">
+					    </td>
+						<td><div id="gif_frames" style="overflow-y: scroll; height:256px; width:280px;"></div></td>
+					  </tr>
+					  <tr>
+					    <td></td>
+						<td><input type="range" min="-300" max="300" value="0" id="gif_cx" step="1" onchange="canvas_control_update()" style="width: 256px;"></td>
+						<td>
+							<label for="improve_colors">Adjust colors</label>
+						    <input type="range" name="improve_colors" id="improve_colors" onchange="show_gif_preview_frames()" min="1.0" max="8.0" value="2" step="0.1" oninput="improve_colors_output.value=parseFloat(improve_colors.value)"/>
+							<output id='improve_colors_output' name='improve_colors_output' style="display:block; width:256px;text-align:center">2.0</output>
+						</td>
+					    <td>
+						  <div id='gif_info'></div>
+						  <button id="upload_gif" onclick="upload_custom_gif()" style="display:none;">Upload</button>
+						  <div id='gif_progress'></div>
+						</td>
+					  </tr>
+				  </table>
+			      
+			  </td>
+	      </tr>
+		  
+		  <tr>
+		      <th style="text-align: center">Individual pixels</th>
+		  </tr>
+		  <tr>
+		      <td style="text-align:center">
+			      <input type="color" name="pixel_color" id = "pixel_color" value='#00FF00'/>
+			      <canvas id="pixels_grid" width="256px" height="256px"/>
+			  </td>
+	      </tr>
+		  
+		  <tr>
+		      <th style="text-align: center">System</th>
+		  </tr>
+		  <tr>
+		      <td>
+			      <table>
+				      <tr>
+					      <td>WiFi Network</td>     <td><span id='wifi_ssid'></span></td>
+					  </tr>				  
+				      <tr>
+					      <td>WiFi strength</td>     <td><span id='wifi_rssi'></span> dBm (<span id='wifi_percent'></span>%)</td>
+					  </tr>
+				      <tr>
+					      <td>Vcc</td>     <td><span id='vcc'></span></td>
+					  </tr>
+				      <tr>
+					      <td>Free RAM (heap)</td>     <td><span id='ram'></span></td>
+					  </tr>
+				      <tr>
+					      <td>Free Storage (LittleFS)</td>     <td><span id='storage'></span></td>
+					  </tr>
+				      <tr>
+					      <td>Core version</td>     <td><span id='core_version'></span></td>
+					  </tr>
+				      <tr>
+					      <td>SDK version</td>     <td><span id='sdk_version'></span></td>
+					  </tr>
+				      <tr>
+					      <td>App build time</td>     <td><span id='app_version'></span></td>
+					  </tr>
+				      <tr>
+					      <td>Device time</td>     <td><span id='device_time'></span></td>
+					  </tr>
+				      <tr>
+					      <td>Uptime</td>     <td><span id='uptime'></span></td>
+					  </tr>
+				  </table>
+		    </td>
+	      </tr>
+		  <tr>
+		      <th style="text-align: center"><button onclick="toggle_advanced()">Advanced</button></th>
+		  </tr>
+		  <tr>
+             <td>		  
+				  <div id="advanced" style="display:none" >
+				      <h3>Set API url manually</h3>
+					  <div>
+					      <label for="api_url">API base url (leave empty to use this instance)</label>
+					      <input type="text" name="api_url" id = "api_url" onchange="api_url_changed()" placeholder="http://192.168.1.134"/>
+					  </div>
+					  
+					  <h3>Upload system file</h3>
+					  
+					  <label for="password">Password:</label>
+					  <input type="password" name="password" id = "password" required/>
+				  
+					  <label for="systemfile">System file:</label>
+					  <input type="file" name="systemfile" id = "systemfile"/>
+					  
+					  <button onclick="upload_systemfile()">Upload system file</button>
+					  <span id="system_message"></span>
+					  
+					  <h3>Reboot</h3>
+					  <button onclick="reboot()">Reboot</button>
+					  
+					  <h3>Change network</</h3> 
+					  <button onclick="change_network_start()">Change network</button>
+					  <br/><br/>
+					  <div id='change_network_tab' style="display:none">
+					    <label for="new_ssid">Network</label>
+						<select name="new_ssid" id="new_ssid" required>
+						</select>
+						<label for="new_pass">WiFi password</label>
+						<input type="text" id="new_pass" name="new_pass" maxlength="32" required/>
+						<button onclick="change_network_execute()">Change to this network</button>
+						<span id='wifi_change_status'></span>
+					  </div>
+				  </div>
+ 			  </td>
+	      </tr>
+      </table>	  
+
+		</br/>
+		</br/>
+		</br/>
+		</br/>
+		</br/>
+		</br/>
+		</br/>
+		</br/>
+   </div>
+	
+	<div class="footer">
+       <p>RGB Matrix</p>
+    </div>
+	
+	<script>
+
+       var apiUrl = document.getElementById("api_url").value;
+	   var pixels_grid = document.getElementById("pixels_grid");
+	   var gif_canvas = document.getElementById("gif_canvas");
+	   var current_gif = null;
+	   var counter = 0;
+	   var first_init = true;
+	   
+	   function make_request(path, data)
+	   {
+	   	 try
+		 {
+			 console.log("POST "+path);
+			 console.log(data);
+			 var urlEncoded = new URLSearchParams(data).toString();
+			 console.log(urlEncoded);
+			 var xhr = new XMLHttpRequest();
+			 xhr.open('POST', apiUrl + path, false);
+			 xhr.setRequestHeader('Content-type', 'application/x-www-form-urlencoded');
+			 xhr.send(urlEncoded);
+			 console.log(xhr.responseText);
+			 return JSON.parse(xhr.responseText);
+		 }
+		 catch (error)
+		 {
+		     console.log(error);
+			 return null;
+		 }
+	   }
+	   
+	   function reboot()
+	   {
+	       make_request('/reboot', {});
+	   }
+	   
+	   function get_data(path)
+	   {
+	     try
+		 {
+			 console.log("GET "+path);
+			 var xhr = new XMLHttpRequest();
+			 xhr.open('GET', apiUrl + path, false);
+			 xhr.send();
+			 console.log(xhr.responseText);
+			 return JSON.parse(xhr.responseText);
+		 }
+		 catch (error)
+		 {
+		     console.log(error);
+			 return null;
+		 }
+	   }
+	   
+	   function get_text(path)
+	   {
+	     try
+		 {
+			 console.log("GET "+path);
+			 var xhr = new XMLHttpRequest();
+			 xhr.open('GET', apiUrl + path, false);
+			 xhr.send();
+			 console.log(xhr.responseText);
+			 return xhr.responseText;
+		 }
+		 catch (error)
+		 {
+		     console.log(error);
+			 return null;
+		 }
+	   }
+	   
+	   function format_duration(secs)
+	   {
+	       if (secs < 60){
+		       return secs + "s";
+		   } else if (secs < 3600) {
+		       return Math.floor(secs/60)+"m"+(secs%60)+"s";
+		   } else {
+		       return Math.floor(secs/(3600*24))+"d"+Math.floor((secs%(3600*24))/60)+"m"+(secs%60)+"s";
+		   }
+	   }
+	   
+	   function rgbToHex(r, g, b) {
+			if (r > 255 || g > 255 || b > 255)
+				throw "Invalid color component";
+			return ((r << 16) | (g << 8) | b).toString(16);
+		}
+		
+		function rssi_to_percent(rssi)
+		{
+			var wifi_percent = 2 * (rssi + 100);
+			if (wifi_percent<0)
+			  wifi_percent = 0;
+			if (wifi_percent>100)
+			  wifi_percent = 100;
+			  
+			return wifi_percent
+		}
+		
+		function show_status(){
+		    var json = get_data('/status');
+			if (json) {
+				document.getElementById("connection").innerHTML = "Connected!";
+				document.getElementById("connection").style.color = "green";
+				document.getElementById("wifi_ssid").innerHTML = ""+json.wifi;
+				document.getElementById("wifi_rssi").innerHTML = ""+json.rssi;
+				document.getElementById("wifi_percent").innerHTML = ""+rssi_to_percent(json.rssi);
+				document.getElementById("vcc").innerHTML = ""+(json.vcc / 1000.0);
+				document.getElementById("ram").innerHTML = ""+json.heap;
+				document.getElementById("storage").innerHTML = ""+json.storage;
+				document.getElementById("core_version").innerHTML = ""+json.core;
+				document.getElementById("sdk_version").innerHTML = ""+json.sdk;
+				document.getElementById("app_version").innerHTML = ""+json.app;
+				document.getElementById("device_time").innerHTML = ""+json.time;
+				document.getElementById("uptime").innerHTML = format_duration(json.uptime);
+				
+				if (first_init) {
+				    document.getElementById("brightness").value = json.b;
+					document.getElementById("brightness_output").value = json.b;
+					var effect = document.getElementById("effect");
+					for(var i=0; i<effect.options.length; i++) {
+					    if (parseInt(effect.options[i].dataset.nr) == json.anim)
+						    effect.value = effect.options[i].value;
+					}
+					first_init = false;
+				}
+			} else {
+			   document.getElementById("connection").innerHTML = "NOT connected :(";
+			   document.getElementById("connection").style.color = "red";
+			}
+		}
+
+	   
+	   function rgb_clear() {
+	       var colorHex = clear_color = document.getElementById("clear_color").value
+		   var rHex = colorHex.substring(1,3);
+		   var gHex = colorHex.substring(3,5);
+		   var bHex = colorHex.substring(5,7);
+		   var r = parseInt(rHex, 16);
+		   var g = parseInt(gHex, 16);
+		   var b = parseInt(bHex, 16);
+	       console.log(r,g,b);
+		   make_request('/clear', {r:r,g:g,b:b});
+		   draw_pixels_grid(pixels_grid,colorHex);
+	   }
+	   
+	   function draw_pixels_grid(canvas, color)
+	   {
+	        var ctx = canvas.getContext("2d");
+	        ctx.fillStyle = color;
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+			var dx = canvas.width / 32;
+			var dy = canvas.height / 32;
+			for (var i = 0; i <= 32; i++) {
+				ctx.moveTo(i*dx, 0);
+				ctx.lineTo(i*dx, canvas.height);
+				ctx.moveTo(0, i*dy);
+				ctx.lineTo(canvas.width, i*dy);
+			}
+			ctx.strokeStyle = 'white';
+			ctx.stroke();
+	   }
+	   
+	   function draw_single_pixel(canvas, x,y,color)
+	   {
+	        var ctx = canvas.getContext("2d");
+	   	    var dx = canvas.width / 32;
+			var dy = canvas.height / 32;
+	        ctx.fillStyle = color;
+            ctx.fillRect(x*dx+1, y*dy+1, dx-2, dy-2);
+	   }
+	   
+		pixels_grid.addEventListener('mousedown', function(e) {
+		    var canvas = pixels_grid;
+		    const rect = canvas.getBoundingClientRect()
+			const x = event.clientX - rect.left;
+			const y = event.clientY - rect.top;
+			var dx = canvas.width / 32;
+			var dy = canvas.height / 32;
+			var ix = Math.floor(x / dx);
+			var iy = Math.floor(y / dy);
+            console.log("x: " + ix + " y: " + iy);
+			var colorHex = document.getElementById("pixel_color").value;
+		    var rHex = colorHex.substring(1,3);
+		    var gHex = colorHex.substring(3,5);
+		    var bHex = colorHex.substring(5,7);
+		    var r = parseInt(rHex, 16);
+		    var g = parseInt(gHex, 16);
+		    var b = parseInt(bHex, 16);
+			make_request('/pixel', {x:ix,y:iy,r:r,g:g,b:b});
+			draw_single_pixel(pixels_grid, ix, iy, colorHex);
+		})
+		
+		function effect_change()
+		{
+		  var name = clear_color = document.getElementById("effect").value;
+		  console.log(name);
+		  if (name == 'scroll')
+		      document.getElementById("scroll_text").style.display = "";
+	      else
+		      document.getElementById("scroll_text").style.display = "none";
+		}
+		
+		function brightness_update()
+		{
+		    var brightness = parseInt(document.getElementById("brightness").value);
+			make_request('/settings', {brightness:brightness});
+		}
+		
+		function effect_start()
+		{
+		  var name = document.getElementById("effect").value;
+		  console.log(name);
+		  var args = {name:name};
+		  if (name == 'scroll')
+		      args.text = document.getElementById("scroll_text").value;
+		  make_request('/effect', args);
+		}
+		
+		function convert_color(x, improve)
+		{
+		    if (improve ==1.0) {
+			    return x;
+			} else {
+			    var f = x / 128.0;  //0..2
+				var max =  Math.pow(2.0, improve);
+				var f = Math.pow(f, improve);
+				var c = Math.round(f*256 / max);
+				if (c<0)
+				    c = 0;
+				if (c>255)
+				    c = 255;
+				return c;
+				
+			}
+		}
+		
+		function show_gif_preview_frames()
+		{
+		  var upload_data = new Uint8Array(current_gif.frames.length*32*32*3);
+		  var improve = document.getElementById("improve_colors").value;
+		  console.log(improve);
+		  for(var i=0; i<current_gif.frames.length; i++)
+		  {
+			var frame_canvas = current_gif.frames[i].image;
+			var tmp_canvas = document.createElement('canvas');
+			tmp_canvas.width = 32;
+			tmp_canvas.height = 32;
+			var tmp_ctx = tmp_canvas.getContext("2d");
+			
+			var rescale = (32.0 / gif_canvas.width);
+			var cx = tmp_canvas.width / 2 +rescale* parseFloat(document.getElementById("gif_cx").value);
+			var cy = tmp_canvas.height / 2 + rescale*parseFloat(document.getElementById("gif_cy").value);
+			var gif_scale = parseFloat(document.getElementById("gif_zoom").value) * rescale;
+			tmp_ctx.drawImage(frame_canvas,cx - (frame_canvas.width / 2)*gif_scale, cy - (frame_canvas.height / 2)*gif_scale,  frame_canvas.width*gif_scale, frame_canvas.height*gif_scale);
+			
+			var preview_canvas = document.getElementById("preview_canvas_"+i);
+			preview_canvas.width = 128;
+			preview_canvas.height = 128;
+			preview_canvas_ctx = preview_canvas.getContext("2d");
+			var dx = preview_canvas.width / 32;
+			var dy = preview_canvas.height / 32;
+			for(var y=0; y<32; y++)
+			{
+			  for(var x=0; x<32; x++)
+			  {
+				  var p = tmp_ctx.getImageData(x, y, 1, 1).data; 
+				  var r = convert_color(p[0], improve);
+				  var g = convert_color(p[1], improve);
+				  var b = convert_color(p[2], improve);
+				  var color = "#" + ("000000" + rgbToHex(r,g,b)).slice(-6);
+				  preview_canvas_ctx.fillStyle = color;
+				  preview_canvas_ctx.fillRect(x*dx,y*dy,dx,dy,0,gif_canvas.width, gif_canvas.height);
+				  upload_data[i*32*32*3+(y*32+x)*3+0] = r;
+				  upload_data[i*32*32*3+(y*32+x)*3+1] = g;
+				  upload_data[i*32*32*3+(y*32+x)*3+2] = b;
+			  }
+			}
+		  }
+		  
+		  return upload_data;
+		}
+		
+		function refresh_gif()
+		{
+		  if (current_gif) {
+		      var ctx = gif_canvas.getContext("2d");
+	          ctx.fillStyle = "black";
+              ctx.fillRect(0,0,gif_canvas.width, gif_canvas.height);
+			  var cx = gif_canvas.width / 2 + parseFloat(document.getElementById("gif_cx").value);
+			  var cy = gif_canvas.height / 2 + parseFloat(document.getElementById("gif_cy").value);
+			  var gif_scale = parseFloat(document.getElementById("gif_zoom").value);
+			  var frame_nr = counter % current_gif.frames.length;
+			  var current_frame = current_gif.frames[frame_nr].image;
+			  ctx.drawImage(current_frame, cx - (current_frame.width / 2)*gif_scale, cy - (current_frame.height / 2)*gif_scale,  current_frame.width*gif_scale, current_frame.height*gif_scale);			  
+			  document.getElementById("gif_info").innerHTML  = current_gif.frames.length+" frames, "+(current_gif.frames.length*32*32*3) + " bytes.";
+			  var preview_canvas_main = document.getElementById("preview_canvas_main");
+			  if (preview_canvas_main)
+			  {
+			      var frame_canvas = document.getElementById("preview_canvas_"+frame_nr);
+				  if (frame_canvas)
+				  {
+				      var preview_canvas_main_ctx = preview_canvas_main.getContext("2d");
+					  preview_canvas_main_ctx.drawImage(frame_canvas,0,0,256,256);
+				  }
+			  }
+		  }
+		}
+		
+		function gif_changed()
+		{
+		    var file = null;
+		    var file_uploader = document.getElementById("gif_file");
+			if (file_uploader.files && file_uploader.files.length > 0)
+			    file = URL.createObjectURL(document.getElementById("gif_file").files[0]);
+			if (document.getElementById("gif_url").value && document.getElementById("gif_url").value.length > 0)
+			    file = document.getElementById("gif_url").value;
+			    
+		    console.log(file);
+			current_gif = GIF();
+			current_gif.onload = function(event){
+			    var frame = current_gif.frames[0].image;
+				var gif_scale = frame.width > frame.height ? gif_canvas.width / frame.width : gif_canvas.height / frame.height;
+				gif_scale = document.getElementById("gif_zoom").value = gif_scale;
+				document.getElementById("gif_cx").value = 0;
+				document.getElementById("gif_cx").value = 0;
+				document.getElementById('gif_frames').innerHTML = '';
+				var preview_canvas_main = document.createElement('canvas');
+				preview_canvas_main.width = 256;
+				preview_canvas_main.height = 256;
+				preview_canvas_main.id = "preview_canvas_main";
+				preview_canvas_main.className  = 'previewcanvas';
+				document.getElementById('gif_frames').appendChild(preview_canvas_main);				
+				for(var i=0; i<current_gif.frames.length; i++)
+			    {
+				    var preview_canvas = document.createElement('canvas');
+				    preview_canvas.width = 128;
+				    preview_canvas.height = 128;
+					preview_canvas.id = "preview_canvas_"+i;
+					preview_canvas.className  = 'previewcanvas';
+					document.getElementById('gif_frames').appendChild(preview_canvas);
+				}
+				refresh_gif();
+				show_gif_preview_frames();
+				document.getElementById("gif_upload_panel").style.display = "";
+				document.getElementById("upload_gif").style.display = "";
+				document.getElementById('gif_progress').innerHTML = "";
+				document.getElementById('gif_status').innerHTML = 'GIF OK';
+				document.getElementById('gif_status').style.color = 'green';
+			};
+			
+            current_gif.onprogress = function(event){ //event.bytesRead    bytes decoded, event.totalBytes   total bytes, event.frame
+			    document.getElementById('gif_status').innerHTML = (100.0 * event.bytesRead / event.totalBytes).toFixed(1) + '%';
+				document.getElementById('gif_status').style.color = 'green';
+            };
+            current_gif.onerror = function(event){    // event.type   a description of the error, event.path   array containing a reference to the gif
+			    document.getElementById('gif_status').innerHTML = 'could not parse gif: '+event.type;
+				document.getElementById('gif_status').style.color = 'red';
+			};
+			
+			document.getElementById('gif_status').innerHTML = 'loading...';
+			current_gif.load(file);
+		}
+		
+		function canvas_control_update(){
+		    refresh_gif();
+			show_gif_preview_frames();
+		}
+		
+		function upload_progress(evt)
+		{
+			var percentComplete = (evt.loaded / evt.total) * 100;  
+			document.getElementById('gif_progress').innerHTML = ""+percentComplete+"%";
+		}
+		
+	   function upload_file(path, file_name, data, callback)
+	   {
+	     console.log("POST "+path);
+		 var blob = new Blob([new Uint8Array(data)], { type: 'application/octet-stream' });
+		 console.log(blob.size);
+		 var xhr = new XMLHttpRequest();
+		 xhr.onprogress = upload_progress;
+         xhr.open('POST', apiUrl + path, true);
+		 var formData = new FormData();
+		 formData.append("blob", blob, file_name);
+		 xhr.onreadystatechange = function() {
+             if (xhr.readyState === 4 && xhr.status === 200) {
+			  callback(JSON.parse(xhr.responseText));
+            }
+         };
+		 
+		 xhr.onerror  = function(e) {
+			  callback({status:"FATAL", msg:e.type});
+         };
+		 
+		 xhr.send(formData);
+	   }
+		
+		function upload_custom_gif()
+		{
+		    var data = show_gif_preview_frames();
+			console.log(data);
+			document.getElementById('gif_progress').innerHTML = "uploading...";
+			upload_file('/upload', 'custom.bin', data, function(response) {
+			    if (response.status == 'OK') {
+					document.getElementById("gif_upload_panel").style.display = "none";
+					document.getElementById("upload_gif").style.display = "none";
+					document.getElementById("gif_file").value = null;
+					document.getElementById("gif_url").value = '';
+					document.getElementById('gif_progress').innerHTML = "";
+					document.getElementById('gif_progress').style.color = 'green';
+				    document.getElementById('gif_status').innerHTML = "uploaded " + response.status + " " + response.msg;
+				    document.getElementById('gif_status').style.color = 'green';
+					make_request('/effect', {name:"customgif"});
+					for(var i=0; i<effect.options.length; i++) {
+					    if (parseInt(effect.options[i].dataset.nr) == 7)
+						    effect.value = effect.options[i].value;
+					}
+				} else {
+				    document.getElementById('gif_progress').innerHTML = "Error: " + response.status + " " + response.msg;
+					document.getElementById('gif_progress').style.color = 'red';
+				    document.getElementById('gif_status').innerHTML = "Error: " + response.status + " " + response.msg;
+				    document.getElementById('gif_status').style.color = 'red';
+				}
+			});
+		}
+		
+		function toggle_advanced()
+		{
+		    if (document.getElementById("advanced").style.display == "none")
+			    document.getElementById("advanced").style.display = ""
+			else
+			    document.getElementById("advanced").style.display = "none";
+		}
+		
+		function systemMessage(msg, color) {
+		    document.getElementById("system_message").style.color = color;
+		    document.getElementById("system_message").innerHTML = msg;
+		}
+		
+		function upload_systemfile()
+		{
+		    var pass = document.getElementById("password").value;
+			var file = document.getElementById("systemfile").files[0];
+			if (pass &&  file){
+			     console.log(file.size);
+				 var xhr = new XMLHttpRequest();
+				 xhr.open('POST', apiUrl + '/upload?password='+pass, false);
+				 var formData = new FormData();
+				 formData.append("file", file);
+		         xhr.send(formData);
+		         console.log(xhr.responseText);
+		         response = JSON.parse(xhr.responseText);
+				 systemMessage(response.status + " " + response.msg, response.status == "OK" ? "green" : "red");
+			} else {
+			    systemMessage("password and file required.", "red")
+			}
+		}
+		
+		function change_network_start()
+        {
+		    var txt = get_text('/wifi');
+			if (txt) {
+			    var select = document.getElementById("new_ssid");
+                for(var i = select.options.length - 1; i >= 0; i--)
+                   select.remove(i);
+   
+		        var lines = txt.split('\n');
+				for(var i=0; i<lines.length; i++)
+				{
+				   var line = lines[i];
+				   if (line.length>1)
+				   {
+					   var name = line.split('\t')[0];
+					   var rssi = line.split('\t')[1];
+					   var option = document.createElement("option");
+					   option.text = name + " (" + rssi_to_percent(parseInt(rssi))+'%)';
+					   option.value = name;
+					   select.add(option);
+				   }
+				   
+				}
+				document.getElementById("change_network_tab").style.display = "";
+			}
+		}
+		
+		function change_network_execute()
+		{
+		    var new_ssid = document.getElementById("new_ssid").value;
+			var new_pass = document.getElementById("new_pass").value;
+			var json = make_request('/wifi', {ssid:new_ssid,pass:new_pass});
+			if (json)
+			    document.getElementById("wifi_change_status").innerHTML = json.status + " " + json.msg;
+		}
+	   
+	   draw_pixels_grid(pixels_grid, '#000000');
+	   
+	   function api_url_changed(){
+	       apiUrl = document.getElementById("api_url").value;
+		   console.log("using api url = "+apiUrl);
+		   show_status();
+	   }
+	   
+	   api_url_changed();
+	   
+	   setInterval(function() { 
+	       counter++;
+		   refresh_gif();
+	   }, 100);	
+	   
+	   
+	   setInterval(function() { 
+		   show_status();
+	   }, 10000);	
+	   
+	   document.getElementById("gif_file").value = null;
+   	   document.getElementById("gif_url").value = '';
+	   
+	   show_status();
+	   
+
+		
+	</script>
+</body>
+</html>
