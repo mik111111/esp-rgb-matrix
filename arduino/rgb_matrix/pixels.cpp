@@ -36,6 +36,10 @@ inline uint8_t *pgm_read_bitmap_ptr(const GFXfont *gfxFont) {
 Adafruit_NeoPixel pixels(NUMPIXELS, DATA_PIN, NEO_GRB + NEO_KHZ800);
 int16_t pixels_indexes[WIDTH*HEIGHT];
 
+// *******************************************
+// This function compute pixel index for NeoPixel library based on x,y coordinates
+// Tweak this function to adapt to specific LED arrays configuration when connected in series 
+// *******************************************
 int compute_pixel_index(int x, int y)
 {
   if (x<0 || y < 0 || x >= WIDTH || y >= HEIGHT)
