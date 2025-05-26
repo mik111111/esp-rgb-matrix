@@ -3,7 +3,7 @@
 ![gif animation](https://github.com/panjanek/esp-rgb-matrix/blob/2fc2af995d744b665803bd0670991a984f6a42d1/images/nyan.gif "gif animation")
 ![audio display](https://github.com/panjanek/esp-rgb-matrix/blob/aabbcbba27b0b82aa1bab2a1f2d544c8b58a9e62/images/audio.gif "audio display")
 
-![Web interface](https://github.com/panjanek/esp-rgb-matrix/blob/b7c0791ffc91d8f2bd6cf2ae6a49950e5b408bb4/images/www.gif "web interface")
+![Web interface](https://github.com/panjanek/esp-rgb-matrix/blob/ffc95c94f9b5d970e469c997543260db35100f33/images/www2.gif "web interface")
 
 ![uploaded gif](https://github.com/panjanek/esp-rgb-matrix/blob/aabbcbba27b0b82aa1bab2a1f2d544c8b58a9e62/images/mario.gif "uploaded gif")
 ![clock mode](https://github.com/panjanek/esp-rgb-matrix/blob/aabbcbba27b0b82aa1bab2a1f2d544c8b58a9e62/images/clock.gif "clock mode")
